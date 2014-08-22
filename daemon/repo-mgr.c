@@ -71,6 +71,10 @@ static void seaf_repo_manager_del_repo_property (SeafRepoManager *manager,
                                                  const char *repo_id);
 
 static int save_branch_repo_map (SeafRepoManager *manager, SeafBranch *branch);
+static void save_repo_property (SeafRepoManager *manager,
+                                const char *repo_id,
+                                const char *key, const char *value);
+
 
 gboolean
 is_repo_id_valid (const char *id)
@@ -133,22 +137,6 @@ seaf_repo_check_worktree (SeafRepo *repo)
     }
 
     return 0;
-}
-
-static void
-send_wktree_notification (SeafRepo *repo, int addordel)
-{
-    if (seaf_repo_check_worktree(repo) < 0)
-        return;
-    if (addordel) {
-        seaf_mq_manager_publish_notification (seaf->mq_mgr,
-                                              "repo.setwktree",
-                                              repo->worktree);
-    } else {
-        seaf_mq_manager_publish_notification (seaf->mq_mgr,
-                                              "repo.unsetwktree",
-                                              repo->worktree);
-    }
 }
 
 
@@ -312,6 +300,21 @@ out:
     }
     return commits;
 }
+
+void
+seaf_repo_set_readonly (SeafRepo *repo)
+{
+    repo->is_readonly = TRUE;
+    save_repo_property (repo->manager, repo->id, REPO_PROP_IS_READONLY, "true");
+}
+
+void
+seaf_repo_unset_readonly (SeafRepo *repo)
+{
+    repo->is_readonly = FALSE;
+    save_repo_property (repo->manager, repo->id, REPO_PROP_IS_READONLY, "false");
+}
+
 
 static inline gboolean
 has_trailing_space_or_period (const char *path)
@@ -2271,7 +2274,6 @@ seaf_repo_manager_set_repo_worktree (SeafRepoManager *mgr,
     if (repo->worktree)
         g_free (repo->worktree);
     repo->worktree = g_strdup(worktree);
-    send_wktree_notification (repo, TRUE);
 
     if (seaf_repo_manager_set_repo_property (mgr, repo->id,
                                              "worktree",
@@ -2373,7 +2375,7 @@ watch_repos (SeafRepoManager *mgr)
     g_hash_table_iter_init (&iter, mgr->priv->repo_hash);
     while (g_hash_table_iter_next (&iter, &key, &value)) {
         repo = value;
-        if (repo->auto_sync && !repo->worktree_invalid) {
+        if (repo->auto_sync && !repo->worktree_invalid && !repo->is_readonly) {
             if (seaf_wt_monitor_watch_repo (seaf->wt_monitor, repo->id, repo->worktree) < 0) {
                 g_warning ("failed to watch repo %s.\n", repo->id);
                 /* If we fail to add watch at the beginning, sync manager
@@ -2447,7 +2449,6 @@ seaf_repo_manager_add_repo (SeafRepoManager *manager,
     g_hash_table_insert (manager->priv->repo_hash, g_strdup(repo->id), repo);
 
     pthread_rwlock_unlock (&manager->priv->lock);
-    send_wktree_notification (repo, TRUE);
 
     return 0;
 }
@@ -2469,7 +2470,6 @@ seaf_repo_manager_mark_repo_deleted (SeafRepoManager *mgr, SeafRepo *repo)
     pthread_mutex_unlock (&mgr->priv->db_lock);
 
     repo->delete_pending = TRUE;
-    send_wktree_notification (repo, FALSE);
 
     return 0;
 }
@@ -2606,13 +2606,14 @@ seaf_repo_manager_del_repo (SeafRepoManager *mgr,
 
     pthread_rwlock_unlock (&mgr->priv->lock);
 
-    send_wktree_notification (repo, FALSE);
-
     seaf_repo_free (repo);
 
     return 0;
 }
 
+/*
+  Return the internal Repo in hashtable. The caller should not free the returned Repo.
+ */
 SeafRepo*
 seaf_repo_manager_get_repo (SeafRepoManager *manager, const gchar *id)
 {
@@ -3054,8 +3055,14 @@ load_repo (SeafRepoManager *manager, const char *repo_id)
         }
     }
 
+    /* load readonly property */
+    value = load_repo_property (manager, repo->id, REPO_PROP_IS_READONLY);
+    if (g_strcmp0(value, "true") == 0)
+        repo->is_readonly = TRUE;
+    else
+        repo->is_readonly = FALSE;
+
     g_hash_table_insert (manager->priv->repo_hash, g_strdup(repo->id), repo);
-    send_wktree_notification (repo, TRUE);
 
     return repo;
 }
@@ -3232,6 +3239,7 @@ seaf_repo_manager_set_repo_relay_id (SeafRepoManager *mgr,
         repo->relay_id = NULL;        
     return 0;
 }
+
 
 int
 seaf_repo_manager_set_repo_property (SeafRepoManager *manager, 
