@@ -21,6 +21,9 @@
 #include "sync-mgr.h"
 #include "wt-monitor.h"
 #include "mq-mgr.h"
+
+#include "http-tx-mgr.h"
+
 #include <searpc-client.h>
 
 struct _CcnetClient;
@@ -64,6 +67,8 @@ struct _SeafileSession {
 
     CEventManager       *ev_mgr;
     CcnetJobManager     *job_mgr;
+
+    HttpTxManager       *http_tx_mgr;
 
     /* Set after all components are up and running. */
     gboolean             started;
