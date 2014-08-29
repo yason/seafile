@@ -154,6 +154,7 @@ start_clone_v2 (CloneTask *task)
         seaf_repo_manager_set_repo_email (seaf->repo_mgr, repo, task->email);
         seaf_repo_manager_set_repo_relay_info (seaf->repo_mgr, repo->id,
                                                task->peer_addr, task->peer_port);
+        seaf_repo_manager_set_repo_relay_id (seaf->repo_mgr, repo, task->peer_id);
 
         mark_clone_done_v2 (repo, task);
         return;
@@ -1943,6 +1944,7 @@ on_repo_fetched (SeafileSession *seaf,
     seaf_repo_manager_set_repo_email (seaf->repo_mgr, repo, task->email);
     seaf_repo_manager_set_repo_relay_info (seaf->repo_mgr, repo->id,
                                            task->peer_addr, task->peer_port);
+    seaf_repo_manager_set_repo_relay_id (seaf->repo_mgr, repo, task->peer_id);
 
     if (!task->server_side_merge)
         start_checkout (repo, task);

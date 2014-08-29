@@ -61,6 +61,7 @@ enum {
     SYNC_ERROR_MERGE,
     SYNC_ERROR_WORKTREE_DIRTY,
     SYNC_ERROR_DEPRECATED_SERVER,
+    SYNC_ERROR_GET_SYNC_INFO,   /* for http sync */
     SYNC_ERROR_UNKNOWN,
     SYNC_ERROR_NUM,
 };
@@ -80,21 +81,11 @@ struct _SyncTask {
     gboolean         server_side_merge;
     gboolean         uploaded;
 
+    gboolean         http_sync;
+    int              http_version;
+
     SeafRepo        *repo;  /* for convenience, only valid when in_sync. */
 };
-
-enum {
-    SERVER_SIDE_MERGE_UNKNOWN = 0,
-    SERVER_SIDE_MERGE_SUPPORTED,
-    SERVER_SIDE_MERGE_UNSUPPORTED,
-};
-
-struct _ServerState {
-    int server_side_merge;
-    gboolean checking;
-};
-
-typedef struct _ServerState ServerState;
 
 struct _SeafileSession;
 
@@ -107,6 +98,7 @@ struct _SeafSyncManager {
     int         sync_interval;
 
     GHashTable *server_states;
+    GHashTable *http_server_states;
 
     SeafSyncManagerPriv *priv;
 };

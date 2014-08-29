@@ -1805,12 +1805,6 @@ update_local_repo (TransferTask *task)
         branch = seaf_branch_new ("master", task->repo_id, task->head);
         seaf_branch_manager_add_branch (seaf->branch_mgr, branch);
         seaf_branch_unref (branch);
-
-        /* Set relay to where this repo from. */
-        if (is_peer_relay (task->dest_id)) {
-            seaf_repo_manager_set_repo_relay_id (seaf->repo_mgr, repo,
-                                                 task->dest_id);
-        }
     } else {
         if (!repo) {
             transition_state_to_error (task, TASK_ERR_UNKNOWN);

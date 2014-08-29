@@ -26,6 +26,26 @@
 #define CHECK_SYNC_INTERVAL  1000 /* 1s */
 #define MAX_RUNNING_SYNC_TASKS 5
 
+enum {
+    SERVER_SIDE_MERGE_UNKNOWN = 0,
+    SERVER_SIDE_MERGE_SUPPORTED,
+    SERVER_SIDE_MERGE_UNSUPPORTED,
+};
+
+struct _ServerState {
+    int server_side_merge;
+    gboolean checking;
+};
+typedef struct _ServerState ServerState;
+
+struct _HttpServerState {
+    gboolean http_not_supported;
+    int http_version;
+    gint64 last_check_time;
+    gboolean checking;
+};
+typedef struct _HttpServerState HttpServerState;
+
 struct _SeafSyncManagerPriv {
     struct CcnetTimer *check_sync_timer;
     int    pulse_count;
@@ -73,6 +93,9 @@ seaf_sync_manager_new (SeafileSession *seaf)
 
     mgr->server_states = g_hash_table_new_full (g_str_hash, g_str_equal,
                                                 g_free, g_free);
+
+    mgr->http_server_states = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                                     g_free, g_free);
 
     return mgr;
 }
@@ -424,6 +447,7 @@ static const char *sync_error_str[] = {
     "Conflict in merge.",
     "Files changed in local folder, skip merge.",
     "Server version is too old.",
+    "Failed to get sync info from server.",
     "Unknown error.",
 };
 
@@ -472,23 +496,39 @@ static void
 start_upload_if_necessary (SyncTask *task)
 {
     GError *error = NULL;
+    SeafRepo *repo = task->repo;
     const char *repo_id = task->repo->id;
 
-    char *tx_id = seaf_transfer_manager_add_upload (seaf->transfer_mgr,
-                                                    repo_id,
-                                                    task->repo->version,
-                                                    task->dest_id,
-                                                    "local",
-                                                    "master",
-                                                    task->token,
-                                                    task->server_side_merge,
-                                                    &error);
-    if (error != NULL) {
-        seaf_warning ("Failed to start upload: %s\n", error->message);
-        seaf_sync_manager_set_task_error (task, SYNC_ERROR_START_UPLOAD);
-        return;
+    if (!task->http_sync) {
+        char *tx_id = seaf_transfer_manager_add_upload (seaf->transfer_mgr,
+                                                        repo_id,
+                                                        task->repo->version,
+                                                        task->dest_id,
+                                                        "local",
+                                                        "master",
+                                                        task->token,
+                                                        task->server_side_merge,
+                                                        &error);
+        if (error != NULL) {
+            seaf_warning ("Failed to start upload: %s\n", error->message);
+            seaf_sync_manager_set_task_error (task, SYNC_ERROR_START_UPLOAD);
+            return;
+        }
+        task->tx_id = tx_id;
+    } else {
+        if (http_tx_manager_add_upload (seaf->http_tx_mgr,
+                                        repo->id,
+                                        repo->version,
+                                        repo->server_url,
+                                        repo->token,
+                                        task->http_version,
+                                        &error) < 0) {
+            seaf_warning ("Failed to start http upload: %s\n", error->message);
+            seaf_sync_manager_set_task_error (task, SYNC_ERROR_START_UPLOAD);
+            return;
+        }
     }
-    task->tx_id = tx_id;
+
     transition_sync_state (task, SYNC_STATE_UPLOAD);
 }
 
@@ -497,27 +537,46 @@ start_fetch_if_necessary (SyncTask *task)
 {
     GError *error = NULL;
     char *tx_id;
+    SeafRepo *repo = task->repo;
     const char *repo_id = task->repo->id;
 
-    tx_id = seaf_transfer_manager_add_download (seaf->transfer_mgr,
-                                                repo_id,
-                                                task->repo->version,
-                                                task->dest_id,
-                                                "fetch_head",
-                                                "master",
-                                                task->token,
-                                                task->server_side_merge,
-                                                NULL,
-                                                NULL,
-                                                &error);
+    if (!task->http_sync) {
+        tx_id = seaf_transfer_manager_add_download (seaf->transfer_mgr,
+                                                    repo_id,
+                                                    task->repo->version,
+                                                    task->dest_id,
+                                                    "fetch_head",
+                                                    "master",
+                                                    task->token,
+                                                    task->server_side_merge,
+                                                    NULL,
+                                                    NULL,
+                                                    &error);
 
-    if (error != NULL) {
-        seaf_warning ("[sync-mgr] Failed to start download: %s\n",
-                         error->message);
-        seaf_sync_manager_set_task_error (task, SYNC_ERROR_START_FETCH);
-        return;
+        if (error != NULL) {
+            seaf_warning ("[sync-mgr] Failed to start download: %s\n",
+                          error->message);
+            seaf_sync_manager_set_task_error (task, SYNC_ERROR_START_FETCH);
+            return;
+        }
+        task->tx_id = tx_id;
+    } else {
+        if (http_tx_manager_add_download (seaf->http_tx_mgr,
+                                          repo->id,
+                                          repo->version,
+                                          repo->server_url,
+                                          repo->token,
+                                          task->info->head_commit,
+                                          FALSE,
+                                          NULL, NULL,
+                                          task->http_version,
+                                          &error) < 0) {
+            seaf_warning ("Failed to start http download: %s.\n", error->message);
+            seaf_sync_manager_set_task_error (task, SYNC_ERROR_START_FETCH);
+            return;
+        }
     }
-    task->tx_id = tx_id;
+
     transition_sync_state (task, SYNC_STATE_FETCH);
 }
 
@@ -1153,6 +1212,37 @@ start_sync_repo_proc (SeafSyncManager *manager, SyncTask *task)
     return 0;
 }
 
+static void
+check_head_commit_done (HttpHeadCommit *result, void *user_data)
+{
+    SyncTask *task = user_data;
+    SyncInfo *info = task->info;
+
+    if (!result->check_success) {
+        seaf_sync_manager_set_task_error (task, SYNC_ERROR_GET_SYNC_INFO);
+        return;
+    }
+
+    info->deleted_on_relay = result->is_deleted;
+    info->repo_corrupted = result->is_corrupt;
+    memcpy (info->head_commit, result->head_commit, 40);
+
+    update_sync_status_v2 (task);
+}
+
+static int
+check_head_commit_http (SyncTask *task)
+{
+    SeafRepo *repo = task->repo;
+
+    return http_tx_manager_check_head_commit (seaf->http_tx_mgr,
+                                              repo->id, repo->version,
+                                              repo->server_url,
+                                              repo->token,
+                                              check_head_commit_done,
+                                              task);
+}
+
 struct CommitResult {
     SyncTask *task;
     gboolean changed;
@@ -1229,9 +1319,12 @@ commit_job_done (void *vres)
     } else {
         if (res->changed)
             start_upload_if_necessary (res->task);
-        else if (task->is_manual_sync || task->is_initial_commit)
-            start_sync_repo_proc (task->mgr, task);
-        else
+        else if (task->is_manual_sync || task->is_initial_commit) {
+            if (task->http_sync)
+                check_head_commit_http (task);
+            else
+                start_sync_repo_proc (task->mgr, task);
+        } else
             transition_sync_state (task, SYNC_STATE_DONE);
     }
 
@@ -1386,6 +1479,15 @@ create_sync_task_v2 (SeafSyncManager *manager, SeafRepo *repo,
     task->info->in_sync = TRUE;
     task->repo = repo;
 
+    HttpServerState *state = g_hash_table_lookup (manager->http_server_states,
+                                                  repo->server_url);
+    if (state) {
+        if (!state->http_not_supported) {
+            task->http_sync = TRUE;
+            task->http_version = state->http_version;
+        }
+    }
+
     return task;
 }
 
@@ -1492,7 +1594,10 @@ sync_repo_v2 (SeafSyncManager *manager, SeafRepo *repo, gboolean is_manual_sync)
 
     if (is_manual_sync || can_schedule_repo (manager, repo)) {
         task = create_sync_task_v2 (manager, repo, is_manual_sync, FALSE);
-        start_sync_repo_proc (manager, task);
+        if (task->http_sync)
+            check_head_commit_http (task);
+        else
+            start_sync_repo_proc (manager, task);
     }
 
 out:
@@ -1589,6 +1694,57 @@ check_relay_status (SeafSyncManager *mgr, SeafRepo *repo)
             return FALSE;
         }
     }
+}
+
+static void
+check_http_protocol_done (HttpProtocolVersion *result, void *user_data)
+{
+    HttpServerState *state = user_data;
+
+    state->checking = FALSE;
+
+    if (result->check_success) {
+        state->http_not_supported = result->not_supported;
+        if (!result->not_supported)
+            state->http_version = result->version;
+    }
+}
+
+#define CHECK_HTTP_INTERVAL 10
+
+static gboolean
+check_http_protocol (SeafSyncManager *mgr, SeafRepo *repo)
+{
+    /* If a repo was cloned before http sync is enabled, server-url is not set. */
+    if (!repo->server_url)
+        return FALSE;
+
+    HttpServerState *state = g_hash_table_lookup (mgr->http_server_states,
+                                                  repo->server_url);
+    if (!state) {
+        state = g_new0 (ServerState, 1);
+        g_hash_table_insert (mgr->http_server_states,
+                             g_strdup(repo->server_url), state);
+    }
+
+    if (state->http_not_supported)
+        return FALSE;
+    if (state->http_version > 0)
+        return TRUE;
+
+    gint64 now = (gint64)time(NULL);
+
+    if (!state->checking &&
+        (now - state->last_check_time > CHECK_HTTP_INTERVAL)) {
+        http_tx_manager_check_protocol_version (seaf->http_tx_mgr,
+                                                repo->server_url,
+                                                check_http_protocol_done,
+                                                state);
+        state->checking = TRUE;
+        state->last_check_time = now;
+    }
+
+    return FALSE;
 }
 
 /*
@@ -1712,15 +1868,21 @@ auto_sync_pulse (void *vmanager)
         if (!manager->priv->auto_sync_enabled || !repo->auto_sync)
             continue;
 
+        SyncInfo *info = get_sync_info (manager, repo->id);
+
+        if (info->in_sync)
+            continue;
+
+        /* Try to use http sync first if enabled. */
+        if (check_http_protocol (manager, repo)) {
+            sync_repo_v2 (manager, repo, FALSE);
+            continue;
+        }
+
         /* If relay is not ready or protocol version is not determined,
          * need to wait.
          */
         if (!check_relay_status (manager, repo))
-            continue;
-
-        SyncInfo *info = get_sync_info (manager, repo->id);
-
-        if (info->in_sync)
             continue;
 
         ServerState *state = g_hash_table_lookup (manager->server_states,
@@ -1816,7 +1978,10 @@ on_repo_uploaded (SeafileSession *seaf,
             transition_sync_state (task, SYNC_STATE_DONE);
         else {
             task->uploaded = TRUE;
-            start_sync_repo_proc (manager, task);
+            if (!task->http_sync)
+                start_sync_repo_proc (manager, task);
+            else
+                check_head_commit_http (task);
         }
     } else if (tx_task->state == TASK_STATE_CANCELED) {
         transition_sync_state (task, SYNC_STATE_CANCELED);
