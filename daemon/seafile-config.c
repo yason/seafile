@@ -3,6 +3,7 @@
 #include "common.h"
 #include "db.h"
 
+#include "log.h"
 #include "seafile-config.h"
 
 
