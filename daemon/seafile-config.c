@@ -36,7 +36,12 @@ char *
 seafile_session_config_get_string (SeafileSession *session,
                                    const char *key)
 {
-    return (config_get_string (session->config_db, key));
+    char *ret = config_get_string (session->config_db, key);
+    if (ret)
+        seaf_message ("seafile_session_config_get_string: %s %s\n", key, ret);
+    else
+        seaf_message ("seafile_session_config_get_string: %s NULL\n", key);
+    return ret;
 }
 
 int
@@ -69,10 +74,15 @@ seafile_session_config_get_bool (SeafileSession *session,
     gboolean ret = FALSE;
 
     value = config_get_string (session->config_db, key);
+    if (value != NULL)
+        seaf_message ("seafile_session_config_get_bool: %s\n", value);
+    else
+        seaf_message ("seafile_session_config_get_bool: NULL\n");
     if (g_strcmp0(value, "true") == 0)
         ret = TRUE;
 
     g_free (value);
+    seaf_message ("seafile_session_config_get_bool: return %d\n", ret);
     return ret;
 }
 
@@ -89,6 +99,7 @@ seafile_session_config_set_string (SeafileSession *session,
     if (sqlite_query_exec (session->config_db, sql) < 0)
         return -1;
 
+    seaf_message ("seafile_session_config_set_string: %s %s\n", key, value);
     if (g_strcmp0(key, KEY_SYNC_EXTRA_TEMP_FILE) == 0) {
         if (g_strcmp0(value, "true") == 0)
             session->sync_extra_temp_file = TRUE;
